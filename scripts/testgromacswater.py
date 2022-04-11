@@ -131,8 +131,39 @@ print(f"Energy: {energy:.3f}")
 print(f"Forces: {torch.norm(forces):.3f}")
 
 '''
+'''
+#Version 2 Energy Minimization
+MAX_COUNT = 700
+STEP_SIZE = 0.05
+FTOL = 2.22E-16
+def minimize_energy(pos,oldenergy,oldforces,count):
+    if (count < MAX_COUNT):
+        newpos = pos + STEP_SIZE*oldforces.to('cpu')
 
-#TODO: Write own energy minimization step
+        energy, forces = sm(species, newpos)
+        norm_forces = torch.norm(forces)
+        print(f"Energy: {energy:f}")
+        print(f"Forces: {norm_forces:f}")
+        if (((oldenergy-energy)/max(abs(oldenergy),abs(energy),1)) > FTOL):
+            return minimize_energy(newpos,energy,forces,count+1)
+        else:
+            return newpos, energy, forces
+    else:
+        return pos, oldenergy, oldforces
+
+
+newpos, energy, forces = minimize_energy(pos, energy, forces, 0)
+
+norm_forces = torch.norm(forces)
+print("FINAL FORCES")
+print(f"Energy: {energy:.3f}")
+print(f"Forces: {norm_forces:.3f}")
+
+import pdb; pdb.set_trace()
+
+
+'''
+#Version 1 energy minimization step
 newpos = pos
 change_ratio = 1
 step_size = 0.05
@@ -156,9 +187,6 @@ for atom in topo.atoms():
 
 
 print("Add forces to particle Worked")
-
-
-
 
 
 #Create Integrator and Simulation
@@ -189,7 +217,6 @@ for i in range(5_000):
     simulation.step(1)
     simulation.topology.createStandardBonds()
     state = simulation.context.getState(getPositions=True)
-    print(state.getPeriodicBoxVectors())
     positions = state.getPositions()
     newpos = torch.FloatTensor([[pos.x,pos.y,pos.z] for pos in positions])*10.0
     energy, forces = sm(species, newpos)
