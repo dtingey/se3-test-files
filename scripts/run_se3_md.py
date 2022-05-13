@@ -36,6 +36,8 @@ PARSER.add_argument('-s', dest='stepSize',type=float, default=0.5,
                       help='stepsize in femtoseconds, default=0.5')
 PARSER.add_argument('-t', dest='simTime',type=float, default=1.0,
                       help='simulation time in picoseconds, default=1')
+PARSER.add_argument('-m', dest='modelFile',type=str, default='model_ani1x_5-12.pth',
+                      help='simulation time in picoseconds, default=1')
 
 args = PARSER.parse_args()
 #initialize default parameters
@@ -43,6 +45,7 @@ in_file = args.inFile
 out_file = args.outFile
 step_size = args.stepSize
 simulation_time = args.simTime
+model_file = args.modelFile
 
 ######Load Model############
 #args = PARSER.parse_args()
@@ -61,7 +64,7 @@ model = SE3TransformerANI1x(
 
 device = torch.cuda.current_device()
 model.to(device=device)
-checkpoint = torch.load('./model_ani1x_3-14.pth', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
+checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
 model.load_state_dict(checkpoint['state_dict'])
 
 ENERGY_STD = 0.1062
