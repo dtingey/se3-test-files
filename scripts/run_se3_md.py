@@ -92,6 +92,8 @@ pdbf = PDBFile(in_file)
 system = System()
 topo = pdbf.topology
 
+
+
 '''
 #Make a Box 1 nm
 box = system.getDefaultPeriodicBoxVectors()
@@ -100,16 +102,16 @@ for i in range(3):
 '''
 
 
-waterforce = GBSAOBCForce()
+#waterforce = GBSAOBCForce()
 
 #import pdb; pdb.set_trace()
 print('############SUCCESS##########')
 for atom in topo.atoms():
     print(atom.name + ': ' + str(atom.element.atomic_number) + ' id: ' + atom.id)
     system.addParticle(atom.element.mass)
-    waterforce.addParticle(1,1,1)
+    #waterforce.addParticle(1,0.1,0.1)
 
-system.addForce(waterforce)
+#system.addForce(waterforce)
 
 #Create Custom Force 
 
