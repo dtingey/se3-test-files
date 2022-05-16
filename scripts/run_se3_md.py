@@ -29,18 +29,18 @@ from openmmtorch import TorchForce
 random.seed()
 
 #parser = argparse.ArgumentParser(description='run md simulations using SE3 Forcefield')
-PARSER.add_argument('-i', dest='inFile',type=str, help='path to the directory with the input pdb file')
+PARSER.add_argument('-i', dest='inFile',type=str, help='Path to the directory with the input pdb file')
 PARSER.add_argument('-o', dest='outFile',type=str, default='md_output.pdb',
-                      help='the name of the output file that will be written in /results/, default=md_output.pdb')
+                      help='The name of the output file that will be written in /results/, default=md_output.pdb')
 PARSER.add_argument('-s', dest='stepSize',type=float, default=0.5,
-                      help='stepsize in femtoseconds, default=0.5')
+                      help='Step size in femtoseconds, default=0.5')
 PARSER.add_argument('-t', dest='simTime',type=float, default=1.0,
-                      help='simulation time in picoseconds, default=1')
-PARSER.add_argument('-m', dest='modelFile',type=str, default='model_ani1x_5-12.pth',
-                      help='simulation time in picoseconds, default=1')
+                      help='Simulation time in picoseconds, default=1')
+PARSER.add_argument('-m', dest='modelFile',type=str, default='model_ani1x_5_12.pth',
+                      help='.pth model file name, default=model_ani1x_5_12.pth')
 
 args = PARSER.parse_args()
-#initialize default parameters
+#initialize parameters
 in_file = args.inFile
 out_file = args.outFile
 step_size = args.stepSize
@@ -48,23 +48,26 @@ simulation_time = args.simTime
 model_file = args.modelFile
 
 ######Load Model############
-#args = PARSER.parse_args()
 args.norm = True
 args.use_layer_norm = True
 args.amp = True
+args.num_degrees = 3
+args.cutoff = 3.0
+args.channels_div = 4
 model = SE3TransformerANI1x(
         fiber_in=Fiber({0: 4}),
         fiber_out=Fiber({0: args.num_degrees * args.num_channels}),
-        fiber_edge=Fiber({0: 0}),
+        fiber_edge=Fiber({0: args.num_basis_fns}),
         output_dim=1,
         tensor_cores=using_tensor_cores(args.amp),  # use Tensor Cores more effectively
         **vars(args)
     )
 
 
-device = torch.cuda.current_device()
+device = 'cuda:0' #torch.cuda.current_device()
 model.to(device=device)
-checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
+checkpoint = torch.load(f'./{model_file}', map_location=device)
+#checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
 model.load_state_dict(checkpoint['state_dict'])
 
 ENERGY_STD = 0.1062
@@ -75,15 +78,19 @@ class SE3Module(torch.nn.Module):
         self.model = trained_model
         eye = torch.eye(4)
         self.species_dict = {'H': eye[0], 'C': eye[1], 'N': eye[2], 'O': eye[3]}
-    def forward(self, species, positions): 
+    def forward(self, species, positions, forces=True): 
         species_tensor = torch.stack([self.species_dict[atom] for atom in species])
         species_tensor = to_cuda(species_tensor)
-        graph = ANI1xDataset._create_graph(positions, cutoff=5.0) # Cutoff for 3-14 model is 5.0 A
+        graph = ANI1xDataset._create_graph(positions, cutoff=args.cutoff) # Cutoff for 5-12 model is 3.0 A
         graph = to_cuda(graph)
         node_feats = {'0': species_tensor.unsqueeze(-1)}
         inputs = [graph, node_feats]
-        energy, forces = self.model(inputs, forces=True, create_graph=False)
-        return energy*ENERGY_STD, forces*ENERGY_STD
+        if forces:
+            energy, forces = self.model(inputs, forces=forces, create_graph=False)
+            return (energy*ENERGY_STD).item(), forces*ENERGY_STD
+        else:
+            energy = self.model(inputs, forces=forces, create_graph=False)
+            return (energy*ENERGY_STD).item()
 
 
 
@@ -137,19 +144,19 @@ sm = SE3Module(model)
 count = 0
 
 def energy_function(positions):
-    positions = torch.tensor(positions, dtype=torch.float).reshape(-1,3)
-    energy, forces = sm(species, positions)
     global count
     count+=1
     print(f'Energy Function called: {count}')
+    positions = torch.tensor(positions, dtype=torch.float).reshape(-1,3)
+    energy = sm(species, positions, forces=False)
     print(f'Energy: {energy:0.5f}')
-    return energy.item()
+    return energy
 
 def jacobian(positions):
+    print('Force Function called')
     positions = torch.tensor(positions, dtype=torch.float).reshape(-1,3)
     energy, forces = sm(species, positions)
     norm_forces = torch.norm(forces)
-    print('Force Function called')
     print(f'Forces: {norm_forces:0.5f}')
     return -forces.to('cpu').flatten()
 
@@ -158,10 +165,12 @@ def jacobian(positions):
 
 pos = torch.FloatTensor(pdbf.getPositions(asNumpy=True).tolist())*10.0
 energy, forces = sm(species, pos)
-norm_forces = torch.norm(forces)
+norm_forces = torch.norm(forces).item()
+
+#import pdb; pdb.set_trace()
+
 print(f"Energy: {energy:.3f}")
 print(f"Forces: {norm_forces:.3f}")
-
 
 print("Minimizing energy....")
 
@@ -170,8 +179,7 @@ newpos = torch.tensor(res.x, dtype=torch.float).reshape(-1,3)
 
 energy, forces = sm(species, newpos)
 print(f"Energy: {energy:.3f}")
-print(f"Forces: {torch.norm(forces):.3f}")
-
+print(f"Forces: {torch.norm(forces).item():.3f}")
 
 '''
 #Version 2 Energy Minimization
@@ -220,19 +228,21 @@ while norm_forces > 0.09:
     print(f"Forces: {norm_forces:.3f}")
 '''
 
-
+#import pdb; pdb.set_trace()
+count = 0
 for atom in topo.atoms():
-    index = int(atom.id)-1
+    index = count
     #c = forces[index] @ newpos[index].to('cuda')
     c = 0
-    se3force.addParticle(index, (forces[index][0].item(), forces[index][1].item(), forces[index][2].item(), c)*kilocalorie_per_mole/angstrom)
+    se3force.addParticle(index, (forces[index][0].item(), forces[index][1].item(), forces[index][2].item(), c)*hartree/angstrom)
+    count+=1
 
 
 print("Add forces to particle Worked")
 
-
+newpos = pos
 #Create Integrator and Simulation
-integrator = LangevinIntegrator(298.0,0.02/femtosecond,step_size*femtosecond)
+integrator = LangevinIntegrator(298.0, 0.02/femtosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
@@ -264,11 +274,13 @@ for i in range(num_steps):
     positions = state.getPositions()
     newpos = torch.FloatTensor([[pos.x,pos.y,pos.z] for pos in positions])*10.0
     energy, forces = sm(species, newpos)
+    count = 0
     for atom in topo.atoms():
-        index = int(atom.id)-1
+        index = count
         #c = forces[index] @ newpos[index].to('cuda')
         c = 0
         se3force.setParticleParameters(index, index, (forces[index][0].item(), forces[index][1].item(), forces[index][2].item(), c)*kilocalorie_per_mole/angstrom)
+        count+=1
 
     se3force.updateParametersInContext(simulation.context)
 
