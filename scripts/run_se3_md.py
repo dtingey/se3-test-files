@@ -125,12 +125,11 @@ for atom in topo.atoms():
 
 #Create Custom Force 
 
-se3force = CustomExternalForce('-fx*x-fy*y-fz*z+c')
+se3force = CustomExternalForce('-fx*x-fy*y-fz*z')
 system.addForce(se3force)
 se3force.addPerParticleParameter('fx')
 se3force.addPerParticleParameter('fy')
 se3force.addPerParticleParameter('fz')
-se3force.addPerParticleParameter('c')
 print("Force Worked")
 
 species = []
@@ -169,6 +168,8 @@ norm_forces = torch.norm(forces).item()
 
 #import pdb; pdb.set_trace()
 
+######################### ENERGY MINIMIZATION ############################
+
 print(f"Energy: {energy:.3f}")
 print(f"Forces: {norm_forces:.3f}")
 
@@ -181,68 +182,65 @@ energy, forces = sm(species, newpos)
 print(f"Energy: {energy:.3f}")
 print(f"Forces: {torch.norm(forces).item():.3f}")
 
-'''
-#Version 2 Energy Minimization
-MAX_COUNT = 700
-STEP_SIZE = 0.05
-FTOL = 2.22E-16
-def minimize_energy(pos,oldenergy,oldforces,count):
-    if (count < MAX_COUNT):
-        newpos = pos + STEP_SIZE*oldforces.to('cpu')
-
-        energy, forces = sm(species, newpos)
-        norm_forces = torch.norm(forces)
-        print(f"Energy: {energy:f}")
-        print(f"Forces: {norm_forces:f}")
-        if (((oldenergy-energy)/max(abs(oldenergy),abs(energy),1)) > FTOL):
-            return minimize_energy(newpos,energy,forces,count+1)
-        else:
-            return newpos, energy, forces
-    else:
-        return pos, oldenergy, oldforces
-
-
-newpos, energy, forces = minimize_energy(pos, energy, forces, 0)
-
-norm_forces = torch.norm(forces)
-print("FINAL FORCES")
-print(f"Energy: {energy:.3f}")
-print(f"Forces: {norm_forces:.3f}")
-
-import pdb; pdb.set_trace()
-
-'''
-'''
-#Version 1 energy minimization step
-newpos = pos
-change_ratio = 1
-step_size = 0.05
-while norm_forces > 0.09:
-    #newpos = pos + step_size(forces)
-    newpos = newpos + step_size*forces.to('cpu')
-    
-    #se3-transformer(newpos)
-    energy, forces = sm(species, newpos)
-    norm_forces = torch.norm(forces)
-    print(f"Energy: {energy:.3f}")
-    print(f"Forces: {norm_forces:.3f}")
-'''
+####################### ADD INITIAL FORCES ##################################
 
 #import pdb; pdb.set_trace()
-count = 0
+index = 0
 for atom in topo.atoms():
-    index = count
     #c = forces[index] @ newpos[index].to('cuda')
     c = 0
-    se3force.addParticle(index, (forces[index][0].item(), forces[index][1].item(), forces[index][2].item(), c)*hartree/angstrom)
-    count+=1
-
+    se3force.addParticle(index, (forces[index][0].item()*627.5, forces[index][1].item()*627.5, forces[index][2].item()*627.5)*kilocalorie_per_mole/angstrom)
+    index+=1
 
 print("Add forces to particle Worked")
 
+####################### ADD INITIAL VELOCITIES ###########################
+kB = BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA
+
+def generateMaxwellBoltzmannVelocities(system, temperature):
+    """Generate Maxwell-Boltzmann velocities.
+
+    ARGUMENTS
+        system (simtk.openmm.System) - the system for which velocities are to be assigned
+        temperature (simtk.unit.Quantity of temperature) - the temperature at which velocities are to be assigned
+
+    RETURNS
+
+    velocities (simtk.unit.Quantity of numpy Nx3 array, units length/time) - particle velocities
+
+    TODO
+    This could be sped up by introducing vector operations.
+
+    """
+
+    # Get number of atoms
+    natoms = system.getNumParticles()
+
+    # Create storage for velocities.
+    velocities = Quantity(np.zeros([natoms, 3], np.float32), nanometer / picosecond) # velocities[i,k] is the kth component of the velocity of atom i
+
+    # Compute thermal energy and inverse temperature from specified temperature.
+    kB = BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA
+    temperature = 298.0 * kelvin
+    kT = kB * temperature # thermal energy
+    beta = 1.0 / kT # inverse temperature
+
+    # Assign velocities from the Maxwell-Boltzmann distribution.
+    for atom_index in range(natoms):
+        mass = system.getParticleMass(atom_index) # atomic mass
+        sigma = sqrt(kT / mass) # standard deviation of velocity distribution for each coordinate for this atom
+        for k in range(3):
+            velocities[atom_index,k] = sigma * np.random.normal()
+    # Return velocities
+    return velocities
+
+####################### SETUP AND RUN SIMULATION #############################
+
 newpos = pos
 #Create Integrator and Simulation
-integrator = LangevinIntegrator(298.0, 0.02/femtosecond, step_size*femtosecond)
+temperature = 298.0 * kelvin
+#integrator = VerletIntegrator(step_size*femtosecond)
+integrator = LangevinIntegrator(temperature, 0.1/femtosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
@@ -250,12 +248,15 @@ simulation = Simulation(topo, system, integrator)
 
 positions = newpos.tolist()*angstrom 
 simulation.context.setPositions(positions)
+velocities = generateMaxwellBoltzmannVelocities(system, temperature)
+simulation.context.setVelocities(velocities)
 #simulation.context.setPeriodicBoxVectors([1.0,0,0],[0,1.0,0],[0,0,1.0])
 
 
 #Print Initial Positions
 print('############Before###############')
 state = simulation.context.getState(getPositions=True, getVelocities=True)
+#import pdb; pdb.set_trace()
 for position in state.getPositions():
     print(position)
 
@@ -272,16 +273,14 @@ for i in range(num_steps):
     #simulation.topology.createStandardBonds()
     state = simulation.context.getState(getPositions=True)
     positions = state.getPositions()
-    newpos = torch.FloatTensor([[pos.x,pos.y,pos.z] for pos in positions])*10.0
+    newpos = torch.FloatTensor([[pos.x,pos.y,pos.z] for pos in positions])*10.0 # Nanometer to Angstrom
     energy, forces = sm(species, newpos)
-    count = 0
+    index = 0
     for atom in topo.atoms():
-        index = count
         #c = forces[index] @ newpos[index].to('cuda')
         c = 0
-        se3force.setParticleParameters(index, index, (forces[index][0].item(), forces[index][1].item(), forces[index][2].item(), c)*kilocalorie_per_mole/angstrom)
-        count+=1
-
+        se3force.setParticleParameters(index, index, (forces[index][0].item()*627.5, forces[index][1].item()*627.5, forces[index][2].item()*627.5)*kilocalorie_per_mole/angstrom)
+        index+=1
     se3force.updateParametersInContext(simulation.context)
 
 
