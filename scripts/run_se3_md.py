@@ -94,6 +94,7 @@ class SE3Module(torch.nn.Module):
 
 
 
+
 #######OpenMM Stuff################
 
 pdbf = PDBFile(in_file)
@@ -240,7 +241,7 @@ newpos = pos
 #Create Integrator and Simulation
 temperature = 298.0 * kelvin
 #integrator = VerletIntegrator(step_size*femtosecond)
-integrator = LangevinIntegrator(temperature, 0.1/femtosecond, step_size*femtosecond)
+integrator = LangevinIntegrator(temperature, 100/picosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
@@ -282,7 +283,6 @@ for i in range(num_steps):
         se3force.setParticleParameters(index, index, (forces[index][0].item()*627.5, forces[index][1].item()*627.5, forces[index][2].item()*627.5)*kilocalorie_per_mole/angstrom)
         index+=1
     se3force.updateParametersInContext(simulation.context)
-
 
 #Print Final Positions
 print('############After###############')
