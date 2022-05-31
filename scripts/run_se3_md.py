@@ -241,7 +241,7 @@ newpos = pos
 #Create Integrator and Simulation
 temperature = 298.0 * kelvin
 #integrator = VerletIntegrator(step_size*femtosecond)
-integrator = LangevinIntegrator(temperature, 100/picosecond, step_size*femtosecond)
+integrator = LangevinIntegrator(temperature, 400/picosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
