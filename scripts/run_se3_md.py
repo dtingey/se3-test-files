@@ -1,13 +1,12 @@
-from se3_transformer.data_loading import ANI1xDataModule
-from se3_transformer.data_loading.ani1x import ANI1xDataset
+from trip.data_loading import TrIPDataModule, GraphConstructor
 from torch.nn.parallel import DistributedDataParallel
-from se3_transformer.model import SE3TransformerANI1x
+from trip.model import TrIP
 from se3_transformer.model.fiber import Fiber
 from se3_transformer.runtime import gpu_affinity
 from se3_transformer.runtime.utils import using_tensor_cores, init_distributed, increase_l2_fetch_granularity
-from se3_transformer.runtime.arguments import PARSER
+from trip.runtime.arguments import PARSER
 from se3_transformer.runtime.utils import to_cuda
-from se3_transformer.runtime.training import *
+from trip.runtime.training import *
 
 import argparse
 import os
@@ -24,7 +23,6 @@ from openmm.app import *
 from openmm import *
 from openmm.unit import *
 from sys import stdout
-from openmmtorch import TorchForce
 
 random.seed()
 
@@ -36,7 +34,7 @@ PARSER.add_argument('-s', dest='stepSize',type=float, default=0.5,
                       help='Step size in femtoseconds, default=0.5')
 PARSER.add_argument('-t', dest='simTime',type=float, default=1.0,
                       help='Simulation time in picoseconds, default=1')
-PARSER.add_argument('-m', dest='modelFile',type=str, default='model_ani1x_5_12.pth',
+PARSER.add_argument('-m', dest='modelFile',type=str, default='9-17-22.pth',
                       help='.pth model file name, default=model_ani1x_5_12.pth')
 
 args = PARSER.parse_args()
@@ -52,13 +50,10 @@ args.norm = True
 args.use_layer_norm = True
 args.amp = True
 args.num_degrees = 3
-args.cutoff = 3.0
-args.channels_div = 4
-model = SE3TransformerANI1x(
-        fiber_in=Fiber({0: 4}),
-        fiber_out=Fiber({0: args.num_degrees * args.num_channels}),
-        fiber_edge=Fiber({0: args.num_basis_fns}),
-        output_dim=1,
+args.cutoff = 4.6
+args.channels_div = 2
+args.num_channels = 16
+model = TrIP(
         tensor_cores=using_tensor_cores(args.amp),  # use Tensor Cores more effectively
         **vars(args)
     )
@@ -77,19 +72,18 @@ class SE3Module(torch.nn.Module):
         super(SE3Module, self).__init__() 
         self.model = trained_model
         eye = torch.eye(4)
-        self.species_dict = {'H': eye[0], 'C': eye[1], 'N': eye[2], 'O': eye[3]}
-    def forward(self, species, positions, forces=True): 
-        species_tensor = torch.stack([self.species_dict[atom] for atom in species])
-        species_tensor = to_cuda(species_tensor)
-        graph = ANI1xDataset._create_graph(positions, cutoff=args.cutoff) # Cutoff for 5-12 model is 3.0 A
-        graph = to_cuda(graph)
-        node_feats = {'0': species_tensor.unsqueeze(-1)}
-        inputs = [graph, node_feats]
+        self.species_dict = {'H': 1, 'C': 6, 'N': 7, 'O': 8}
+        self.graph_constructor = GraphConstructor(cutoff=args.cutoff)
+    def forward(self, species, positions, forces=True):
+        species_tensor = torch.tensor([self.species_dict[atom] for atom in species], dtype=torch.int)
+        species_tensor, positions = to_cuda([species_tensor, positions])
+        graph = self.graph_constructor.create_graphs(positions, torch.tensor(float('inf'))) # Cutoff for 5-12 model is 3.0 A
+        graph.ndata['species'] = species_tensor
         if forces:
-            energy, forces = self.model(inputs, forces=forces, create_graph=False)
+            energy, forces = self.model(graph, forces=forces, create_graph=False)
             return (energy*ENERGY_STD).item(), forces*ENERGY_STD
         else:
-            energy = self.model(inputs, forces=forces, create_graph=False)
+            energy = self.model(graph, forces=forces, create_graph=False)
             return (energy*ENERGY_STD).item()
 
 
@@ -162,8 +156,7 @@ def jacobian(positions):
 
 
 
-
-pos = torch.FloatTensor(pdbf.getPositions(asNumpy=True).tolist())*10.0
+pos = torch.Tensor(pdbf.getPositions(asNumpy=True)/angstrom)
 energy, forces = sm(species, pos)
 norm_forces = torch.norm(forces).item()
 
@@ -240,8 +233,8 @@ def generateMaxwellBoltzmannVelocities(system, temperature):
 newpos = pos
 #Create Integrator and Simulation
 temperature = 298.0 * kelvin
-#integrator = VerletIntegrator(step_size*femtosecond)
-integrator = LangevinIntegrator(temperature, 400/picosecond, step_size*femtosecond)
+integrator = VerletIntegrator(step_size*femtosecond)
+#integrator = LangevinIntegrator(temperature, 2/picosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
