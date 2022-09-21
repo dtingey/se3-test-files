@@ -34,8 +34,8 @@ PARSER.add_argument('-s', dest='stepSize',type=float, default=0.5,
                       help='Step size in femtoseconds, default=0.5')
 PARSER.add_argument('-t', dest='simTime',type=float, default=1.0,
                       help='Simulation time in picoseconds, default=1')
-PARSER.add_argument('-m', dest='modelFile',type=str, default='9-17-22.pth',
-                      help='.pth model file name, default=model_ani1x_5_12.pth')
+PARSER.add_argument('-m', dest='modelFile',type=str, default='9-20-22.pth',
+                      help='.pth model file name, default=')
 
 args = PARSER.parse_args()
 #initialize parameters
@@ -65,7 +65,7 @@ checkpoint = torch.load(f'./{model_file}', map_location=device)
 #checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
 model.load_state_dict(checkpoint['state_dict'])
 
-ENERGY_STD = 0.1062
+ENERGY_STD = 1.0
 
 class SE3Module(torch.nn.Module):
     def __init__(self, trained_model):
@@ -258,7 +258,7 @@ print()
 
 #Run simulation and do force calculations
 simulation.reporters.append(PDBReporter(f'/results/{out_file}', 5))
-simulation.reporters.append(StateDataReporter(stdout, 100, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(StateDataReporter(stdout, 100, step=True, potentialEnergy=True, totalEnergy=True, temperature=True))
 
 num_steps = int((simulation_time/step_size)*1000)
 

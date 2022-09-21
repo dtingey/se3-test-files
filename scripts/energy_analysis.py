@@ -44,11 +44,11 @@ model = TrIP(
 
 device = 'cuda:0' #torch.cuda.current_device()
 model.to(device=device)
-checkpoint = torch.load('./9_15_22.pth', map_location=device)
+checkpoint = torch.load('./9_20_22.pth', map_location=device)
 #checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
 model.load_state_dict(checkpoint['state_dict'])
 
-ENERGY_STD = 0.1062
+ENERGY_STD = 1
 
 class SE3Module(torch.nn.Module):
     def __init__(self, trained_model):
@@ -70,20 +70,20 @@ class SE3Module(torch.nn.Module):
             return (energy*ENERGY_STD).item()
 
 
+for symbol, name in zip(['H','C','N','O'],['hydrogen','carbon','nitrogen','oxygen']):
+    species = [symbol, symbol]
+    sm = SE3Module(model)
 
-species = ['N','N']
-sm = SE3Module(model)
+    r_array = np.linspace(0,2.9,30)
+    e_array = np.zeros_like(r_array)
 
-r_array = np.linspace(0,2.9,30)
-e_array = np.zeros_like(r_array)
+    for i, r in enumerate(r_array):
+        pos = torch.FloatTensor([[0,0,0],[r,0,0]])
+        energy = sm(species, pos, forces=False)
+        e_array[i] = float(energy)
+        print(f'Step {i}: Energy: {float(energy)}')
 
-for i, r in enumerate(r_array):
-    pos = torch.FloatTensor([[0,0,0],[r,0,0]])
-    energy = sm(species, pos, forces=False)
-    e_array[i] = float(energy)
-    print(f'Step {i}: Energy: {float(energy)}')
-
-data = np.array([r_array, e_array])
-np.save('/results/data_nitrogen.npy',data)
+    data = np.array([r_array, e_array])
+    np.save(f'/results/data_{name}.npy',data)
 
 
