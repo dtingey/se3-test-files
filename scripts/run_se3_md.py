@@ -1,21 +1,15 @@
-from trip.data_loading import TrIPDataModule, GraphConstructor
-from torch.nn.parallel import DistributedDataParallel
+from trip.data_loading import GraphConstructor
 from trip.model import TrIP
-from se3_transformer.model.fiber import Fiber
-from se3_transformer.runtime import gpu_affinity
-from se3_transformer.runtime.utils import using_tensor_cores, init_distributed, increase_l2_fetch_granularity
-from trip.runtime.arguments import PARSER
 from se3_transformer.runtime.utils import to_cuda
 from trip.runtime.training import *
 
 import argparse
 import os
-import re
 import random
 import torch
 import numpy as np
 from torch import Tensor
-import scipy
+from scipy.optimize import minimize
 import dgl
 import dgl.data
 from dgl import DGLGraph
@@ -26,18 +20,18 @@ from sys import stdout
 
 random.seed()
 
-#parser = argparse.ArgumentParser(description='run md simulations using SE3 Forcefield')
-PARSER.add_argument('-i', dest='inFile',type=str, help='Path to the directory with the input pdb file')
-PARSER.add_argument('-o', dest='outFile',type=str, default='md_output.pdb',
+parser = argparse.ArgumentParser(description='run md simulations using SE3 Forcefield')
+parser.add_argument('-i', dest='inFile',type=str, help='Path to the directory with the input pdb file')
+parser.add_argument('-o', dest='outFile',type=str, default='md_output.pdb',
                       help='The name of the output file that will be written in /results/, default=md_output.pdb')
-PARSER.add_argument('-s', dest='stepSize',type=float, default=0.5,
+parser.add_argument('-s', dest='stepSize',type=float, default=0.5,
                       help='Step size in femtoseconds, default=0.5')
-PARSER.add_argument('-t', dest='simTime',type=float, default=1.0,
+parser.add_argument('-t', dest='simTime',type=float, default=1.0,
                       help='Simulation time in picoseconds, default=1')
-PARSER.add_argument('-m', dest='modelFile',type=str, default='9-20-22.pth',
+parser.add_argument('-m', dest='modelFile',type=str, default='9-20-22.pth',
                       help='.pth model file name, default=')
 
-args = PARSER.parse_args()
+args = parser.parse_args()
 #initialize parameters
 in_file = args.inFile
 out_file = args.outFile
@@ -46,24 +40,7 @@ simulation_time = args.simTime
 model_file = args.modelFile
 
 ######Load Model############
-args.norm = True
-args.use_layer_norm = True
-args.amp = True
-args.num_degrees = 3
-args.cutoff = 4.6
-args.channels_div = 2
-args.num_channels = 16
-model = TrIP(
-        tensor_cores=using_tensor_cores(args.amp),  # use Tensor Cores more effectively
-        **vars(args)
-    )
-
-
-device = 'cuda:0' #torch.cuda.current_device()
-model.to(device=device)
-checkpoint = torch.load(f'./{model_file}', map_location=device)
-#checkpoint = torch.load(f'./{model_file}', map_location={'cuda:0': f'cuda:{get_local_rank()}'})
-model.load_state_dict(checkpoint['state_dict'])
+model = TrIP.load(f'/results/{model_file}', map_location='cuda:0')
 
 ENERGY_STD = 1.0
 
@@ -73,7 +50,7 @@ class SE3Module(torch.nn.Module):
         self.model = trained_model
         eye = torch.eye(4)
         self.species_dict = {'H': 1, 'C': 6, 'N': 7, 'O': 8}
-        self.graph_constructor = GraphConstructor(cutoff=args.cutoff)
+        self.graph_constructor = GraphConstructor(cutoff=trained_model.cutoff)
     def forward(self, species, positions, forces=True):
         species_tensor = torch.tensor([self.species_dict[atom] for atom in species], dtype=torch.int)
         species_tensor, positions = to_cuda([species_tensor, positions])
@@ -162,6 +139,8 @@ norm_forces = torch.norm(forces).item()
 
 #import pdb; pdb.set_trace()
 
+
+
 ######################### ENERGY MINIMIZATION ############################
 
 print(f"Energy: {energy:.3f}")
@@ -169,12 +148,15 @@ print(f"Forces: {norm_forces:.3f}")
 
 print("Minimizing energy....")
 
-res = scipy.optimize.minimize(energy_function, pos.flatten(), method='CG', jac=jacobian)
+res = minimize(energy_function, pos.flatten(), method='CG', jac=jacobian)
 newpos = torch.tensor(res.x, dtype=torch.float).reshape(-1,3)
 
 energy, forces = sm(species, newpos)
 print(f"Energy: {energy:.3f}")
 print(f"Forces: {torch.norm(forces).item():.3f}")
+
+
+
 
 ####################### ADD INITIAL FORCES ##################################
 
@@ -187,6 +169,9 @@ for atom in topo.atoms():
     index+=1
 
 print("Add forces to particle Worked")
+
+
+
 
 ####################### ADD INITIAL VELOCITIES ###########################
 kB = BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA
@@ -228,13 +213,17 @@ def generateMaxwellBoltzmannVelocities(system, temperature):
     # Return velocities
     return velocities
 
+
+
+
+
 ####################### SETUP AND RUN SIMULATION #############################
 
 newpos = pos
 #Create Integrator and Simulation
 temperature = 298.0 * kelvin
-integrator = VerletIntegrator(step_size*femtosecond)
-#integrator = LangevinIntegrator(temperature, 2/picosecond, step_size*femtosecond)
+#integrator = VerletIntegrator(step_size*femtosecond)
+integrator = LangevinIntegrator(temperature, 1/picosecond, step_size*femtosecond)
 
 #Simulation?
 simulation = Simulation(topo, system, integrator)
@@ -257,7 +246,7 @@ for position in state.getPositions():
 print()
 
 #Run simulation and do force calculations
-simulation.reporters.append(PDBReporter(f'/results/{out_file}', 5))
+simulation.reporters.append(PDBReporter(f'/results/{out_file}', 3))
 simulation.reporters.append(StateDataReporter(stdout, 100, step=True, potentialEnergy=True, totalEnergy=True, temperature=True))
 
 num_steps = int((simulation_time/step_size)*1000)
