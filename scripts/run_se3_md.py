@@ -6,6 +6,8 @@ from trip.runtime.training import *
 import argparse
 import os
 import random
+import time
+from datetime import datetime
 import torch
 import numpy as np
 from torch import Tensor
@@ -18,7 +20,10 @@ from openmm import *
 from openmm.unit import *
 from sys import stdout
 
+
 random.seed()
+
+now = datetime.now()
 
 parser = argparse.ArgumentParser(description='run md simulations using SE3 Forcefield')
 parser.add_argument('-i', dest='inFile',type=str, help='Path to the directory with the input pdb file')
@@ -39,28 +44,60 @@ step_size = args.stepSize
 simulation_time = args.simTime
 model_file = args.modelFile
 
+
+############## File Stuff ##############
+dt_string = now.strftime("%d-%m-%Y_%H:%M:%S")
+path = os.path.join("/results/", dt_string)
+
+os.mkdir(path)
+
+
+def calculate_time(start, end, directory_path=path, message="Unknown"):
+    file_path = os.path.join(directory_path, "time_analysis.txt")
+    with open(file_path, "a") as f:
+        f.write(f"{message}\n")
+        f.write(f"Start time: {start}\n")
+        f.write(f"End time: {end}\n")
+        f.write(f"Time Elapsed: {end - start} seconds\n\n")
+
+
+
+start = time.time()
+
+
 ######Load Model############
 model = TrIP.load(f'/results/{model_file}', map_location='cuda:0')
 
 ENERGY_STD = 1.0
 
 class SE3Module(torch.nn.Module):
-    def __init__(self, trained_model):
+    def __init__(self, trained_model, species):
         super(SE3Module, self).__init__() 
         self.model = trained_model
         eye = torch.eye(4)
         self.species_dict = {'H': 1, 'C': 6, 'N': 7, 'O': 8}
         self.graph_constructor = GraphConstructor(cutoff=trained_model.cutoff)
-    def forward(self, species, positions, forces=True):
-        species_tensor = torch.tensor([self.species_dict[atom] for atom in species], dtype=torch.int)
-        species_tensor, positions = to_cuda([species_tensor, positions])
+        self.species_tensor = torch.tensor([self.species_dict[atom] for atom in species], dtype=torch.int, device='cuda')
+	
+    def forward(self, positions, forces=True):
+        time1 = time.time()
         graph = self.graph_constructor.create_graphs(positions, torch.tensor(float('inf'))) # Cutoff for 5-12 model is 3.0 A
-        graph.ndata['species'] = species_tensor
+        time2= time.time()
+        calculate_time(time1, time2, message="Graph Creation")
+        
+        graph.ndata['species'] = self.species_tensor
+        
+
+        time1 = time.time()
         if forces:
             energy, forces = self.model(graph, forces=forces, create_graph=False)
+            time2 = time.time()
+            calculate_time(time1, time2, message="Energy and Force Calculation:")
             return (energy*ENERGY_STD).item(), forces*ENERGY_STD
         else:
             energy = self.model(graph, forces=forces, create_graph=False)
+            time2 = time.time()
+            calculate_time(time1, time2, message="Energy Calculation")
             return (energy*ENERGY_STD).item()
 
 
@@ -110,7 +147,7 @@ for atom in topo.atoms():
     species.append(sym)
 
 
-sm = SE3Module(model)
+sm = SE3Module(model, species)
 
 count = 0
 
@@ -118,23 +155,23 @@ def energy_function(positions):
     global count
     count+=1
     print(f'Energy Function called: {count}')
-    positions = torch.tensor(positions, dtype=torch.float).reshape(-1,3)
-    energy = sm(species, positions, forces=False)
+    positions = torch.tensor(positions, dtype=torch.float, device='cuda').reshape(-1,3)
+    energy = sm(positions, forces=False)
     print(f'Energy: {energy:0.5f}')
     return energy
 
 def jacobian(positions):
     print('Force Function called')
-    positions = torch.tensor(positions, dtype=torch.float).reshape(-1,3)
-    energy, forces = sm(species, positions)
+    positions = torch.tensor(positions, dtype=torch.float, device='cuda').reshape(-1,3)
+    energy, forces = sm(positions)
     norm_forces = torch.norm(forces)
     print(f'Forces: {norm_forces:0.5f}')
-    return -forces.to('cpu').flatten()
+    return -forces.detach().cpu().numpy().flatten()
 
 
 
-pos = torch.Tensor(pdbf.getPositions(asNumpy=True)/angstrom)
-energy, forces = sm(species, pos)
+pos = torch.tensor(pdbf.getPositions(asNumpy=True)/angstrom, dtype=torch.float, device='cuda')
+energy, forces = sm(pos)
 norm_forces = torch.norm(forces).item()
 
 #import pdb; pdb.set_trace()
@@ -148,19 +185,24 @@ print(f"Forces: {norm_forces:.3f}")
 
 print("Minimizing energy....")
 
-res = minimize(energy_function, pos.flatten(), method='CG', jac=jacobian)
-newpos = torch.tensor(res.x, dtype=torch.float).reshape(-1,3)
+time1 = time.time()
+res = minimize(energy_function, pos.cpu().numpy().flatten(), method='CG', jac=jacobian)
+newpos = torch.tensor(res.x, dtype=torch.float, device='cuda').reshape(-1,3)
 
-energy, forces = sm(species, newpos)
+energy, forces = sm(newpos)
 print(f"Energy: {energy:.3f}")
 print(f"Forces: {torch.norm(forces).item():.3f}")
+time2 = time.time()
 
-
+calculate_time(time1, time2, path, "Minimization Time")
 
 
 ####################### ADD INITIAL FORCES ##################################
 
 #import pdb; pdb.set_trace()
+
+
+time1 = time.time()
 index = 0
 for atom in topo.atoms():
     #c = forces[index] @ newpos[index].to('cuda')
@@ -169,10 +211,11 @@ for atom in topo.atoms():
     index+=1
 
 print("Add forces to particle Worked")
+time2 = time.time()
+calculate_time(time1, time2, path, "Initial Forces")
 
 
-
-
+time1 = time.time()
 ####################### ADD INITIAL VELOCITIES ###########################
 kB = BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA
 
@@ -213,12 +256,13 @@ def generateMaxwellBoltzmannVelocities(system, temperature):
     # Return velocities
     return velocities
 
-
+time2 = time.time()
+calculate_time(time1, time2, path, "Initialize Velocities")
 
 
 
 ####################### SETUP AND RUN SIMULATION #############################
-
+time1 = time.time()
 newpos = pos
 #Create Integrator and Simulation
 temperature = 298.0 * kelvin
@@ -226,6 +270,7 @@ temperature = 298.0 * kelvin
 integrator = LangevinIntegrator(temperature, 1/picosecond, step_size*femtosecond)
 
 #Simulation?
+platform = Platform.getPlatformByName('CUDA')
 simulation = Simulation(topo, system, integrator)
 
 
@@ -246,29 +291,49 @@ for position in state.getPositions():
 print()
 
 #Run simulation and do force calculations
-simulation.reporters.append(PDBReporter(f'/results/{out_file}', 3))
+simulation.reporters.append(PDBReporter(f'{os.path.join(path, out_file)}', 3))
 simulation.reporters.append(StateDataReporter(stdout, 100, step=True, potentialEnergy=True, totalEnergy=True, temperature=True))
 
 num_steps = int((simulation_time/step_size)*1000)
+
+time2 = time.time()
+calculate_time(time1, time2, path, "Simulation Setup:")
+
 
 for i in range(num_steps):
     simulation.step(1)
     #simulation.topology.createStandardBonds()
     state = simulation.context.getState(getPositions=True)
     positions = state.getPositions()
-    newpos = torch.FloatTensor([[pos.x,pos.y,pos.z] for pos in positions])*10.0 # Nanometer to Angstrom
-    energy, forces = sm(species, newpos)
-    index = 0
-    for atom in topo.atoms():
+    newpos = torch.tensor([[pos.x,pos.y,pos.z] for pos in positions], dtype=torch.float, device='cuda')*10.0 # Nanometer to Angstrom
+    
+    time1 = time.time()
+    energy, forces = sm(newpos)
+    time2 = time.time()
+    calculate_time(time1, time2, path, "Energy from Model")
+    
+    forces *= 627.5
+    forces = forces*kilocalorie_per_mole/angstrom
+    
+    #import pdb; pdb.set_trace()
+
+    time1 = time.time()
+    for index, atom in enumerate(topo.atoms()):
         #c = forces[index] @ newpos[index].to('cuda')
         c = 0
-        se3force.setParticleParameters(index, index, (forces[index][0].item()*627.5, forces[index][1].item()*627.5, forces[index][2].item()*627.5)*kilocalorie_per_mole/angstrom)
-        index+=1
+        se3force.setParticleParameters(index, index, forces[index])
+        
     se3force.updateParametersInContext(simulation.context)
+    time2 = time.time()
+    calculate_time(time1, time2, path, "Updating Forces")
 
 #Print Final Positions
 print('############After###############')
 state = simulation.context.getState(getPositions=True, getVelocities=True)
 for position in state.getPositions():
     print(position)
+
+
+end = time.time()
+calculate_time(start, end, path, "Total Time Elapsed")
 
